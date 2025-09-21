@@ -83,3 +83,50 @@
     approved: bool
   }
 )
+
+;; Initialize with valid AI domains
+(define-public (initialize)
+  (begin
+    (asserts! (is-eq tx-sender CONTRACT-OWNER) ERR-NOT-AUTHORIZED)
+    (map-set valid-domains { domain: "machine-learning" } { active: true, min-stake: u1000, project-count: u0 })
+    (map-set valid-domains { domain: "computer-vision" } { active: true, min-stake: u1500, project-count: u0 })
+    (map-set valid-domains { domain: "natural-language" } { active: true, min-stake: u1200, project-count: u0 })
+    (map-set valid-domains { domain: "deep-learning" } { active: true, min-stake: u2000, project-count: u0 })
+    (map-set valid-domains { domain: "data-science" } { active: true, min-stake: u800, project-count: u0 })
+    (map-set valid-domains { domain: "robotics" } { active: true, min-stake: u2500, project-count: u0 })
+    (map-set valid-domains { domain: "blockchain-ai" } { active: true, min-stake: u1800, project-count: u0 })
+    (ok true)
+  )
+)
+
+(define-public (add-domain (domain (string-ascii 50)) (min-stake uint))
+  (begin
+    (asserts! (is-eq tx-sender CONTRACT-OWNER) ERR-NOT-AUTHORIZED)
+    (map-set valid-domains 
+      { domain: domain } 
+      { active: true, min-stake: min-stake, project-count: u0 })
+    (ok true)
+  )
+)
+
+(define-public (deactivate-domain (domain (string-ascii 50)))
+  (begin
+    (asserts! (is-eq tx-sender CONTRACT-OWNER) ERR-NOT-AUTHORIZED)
+    (let
+      ((domain-info (unwrap! (map-get? valid-domains { domain: domain }) ERR-INVALID-DOMAIN)))
+      (map-set valid-domains 
+        { domain: domain } 
+        (merge domain-info { active: false }))
+      (ok true)
+    )
+  )
+)
+
+(define-public (update-platform-fee (new-fee-rate uint))
+  (begin
+    (asserts! (is-eq tx-sender CONTRACT-OWNER) ERR-NOT-AUTHORIZED)
+    (asserts! (<= new-fee-rate u100) ERR-NOT-AUTHORIZED) ;; Max 10% fee
+    (var-set platform-fee-rate new-fee-rate)
+    (ok true)
+  )
+)
