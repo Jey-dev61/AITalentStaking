@@ -545,3 +545,117 @@
     (ok true)
   )
 )
+
+;; Create dispute
+(define-public (create-dispute (project-id uint) (reason (string-ascii 200)))
+  (let
+    (
+      (project (unwrap! (map-get? projects { project-id: project-id }) ERR-PROJECT-NOT-FOUND))
+      (dispute-id (+ (var-get dispute-count) u1))
+    )
+    (asserts! (or (is-eq tx-sender (get client project)) (is-eq tx-sender (get developer project))) ERR-NOT-AUTHORIZED)
+    (asserts! (not (get completed project)) ERR-NOT-AUTHORIZED)
+    
+    (map-set disputes
+      { dispute-id: dispute-id }
+      {
+        project-id: project-id,
+        client: (get client project),
+        developer: (get developer project),
+        reason: reason,
+        resolved: false,
+        resolution: "",
+        created-at: block-height
+      }
+    )
+    
+    (var-set dispute-count dispute-id)
+    (ok dispute-id)
+  )
+)
+
+;; Resolve dispute (admin function)
+(define-public (resolve-dispute (dispute-id uint) (resolution (string-ascii 200)) (favor-client bool))
+  (let
+    (
+      (dispute (unwrap! (map-get? disputes { dispute-id: dispute-id }) ERR-PROJECT-NOT-FOUND))
+      (project (unwrap! (map-get? projects { project-id: (get project-id dispute) }) ERR-PROJECT-NOT-FOUND))
+      (developer-profile (unwrap! (map-get? developer-profiles { developer: (get developer project) }) ERR-PROFILE-NOT-FOUND))
+    )
+    (asserts! (is-eq tx-sender CONTRACT-OWNER) ERR-NOT-AUTHORIZED)
+    (asserts! (not (get resolved dispute)) ERR-NOT-AUTHORIZED)
+    
+    (if favor-client
+      ;; Refund client and penalize developer
+      (begin
+        (try! (as-contract (stx-transfer? (get reward project) tx-sender (get client project))))
+        (map-set developer-profiles
+          { developer: (get developer project) }
+          (merge developer-profile { 
+            reputation-score: (if (> (get reputation-score developer-profile) u20) 
+                                (- (get reputation-score developer-profile) u20) u0),
+            locked-stake: (- (get locked-stake developer-profile) (get stake-required project))
+          })
+        )
+      )
+      ;; Pay developer
+      (try! (as-contract (stx-transfer? (get reward project) tx-sender (get developer project))))
+    )
+    
+    (map-set disputes
+      { dispute-id: dispute-id }
+      (merge dispute { resolved: true, resolution: resolution })
+    )
+    
+    (map-set projects
+      { project-id: (get project-id dispute) }
+      (merge project { completed: true, approved: (not favor-client) })
+    )
+    
+    (ok true)
+  )
+)
+
+;; Read-only functions
+(define-read-only (get-developer-profile (developer principal))
+  (map-get? developer-profiles { developer: developer })
+)
+
+(define-read-only (get-domain-stake (developer principal) (domain (string-ascii 50)))
+  (map-get? domain-stakes { developer: developer, domain: domain })
+)
+
+(define-read-only (get-project (project-id uint))
+  (map-get? projects { project-id: project-id })
+)
+
+(define-read-only (get-dispute (dispute-id uint))
+  (map-get? disputes { dispute-id: dispute-id })
+)
+
+(define-read-only (get-milestone (project-id uint) (milestone-id uint))
+  (map-get? milestones { project-id: project-id, milestone-id: milestone-id })
+)
+
+(define-read-only (is-valid-domain (domain (string-ascii 50)))
+  (default-to { active: false, min-stake: u0, project-count: u0 } (map-get? valid-domains { domain: domain }))
+)
+
+(define-read-only (get-platform-stats)
+  {
+    project-count: (var-get project-count),
+    dispute-count: (var-get dispute-count),
+    total-fees: (var-get total-platform-fees),
+    fee-rate: (var-get platform-fee-rate)
+  }
+)
+
+(define-read-only (get-developer-reputation-rank (developer principal))
+  (let
+    ((profile (map-get? developer-profiles { developer: developer })))
+    (if (is-some profile)
+      (some (get reputation-score (unwrap-panic profile)))
+      none
+    )
+  )
+)
