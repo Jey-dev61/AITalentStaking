@@ -344,3 +344,204 @@
     (ok true)
   )
 )
+
+;; Create a project requiring specific domain expertise
+(define-public (create-project 
+  (title (string-ascii 100))
+  (description (string-ascii 500))
+  (domain (string-ascii 50))
+  (stake-required uint)
+  (reward uint)
+  (deadline uint))
+  (let
+    (
+      (project-id (+ (var-get project-count) u1))
+      (domain-info (unwrap! (map-get? valid-domains { domain: domain }) ERR-INVALID-DOMAIN))
+      (platform-fee (/ (* reward (var-get platform-fee-rate)) u1000))
+      (total-payment (+ reward platform-fee))
+    )
+    (asserts! (get active domain-info) ERR-INVALID-DOMAIN)
+    (asserts! (> deadline block-height) ERR-INVALID-TIMEFRAME)
+    (try! (stx-transfer? total-payment tx-sender (as-contract tx-sender)))
+    
+    (map-set projects
+      { project-id: project-id }
+      {
+        title: title,
+        description: description,
+        domain: domain,
+        client: tx-sender,
+        developer: CONTRACT-OWNER,
+        stake-required: stake-required,
+        reward: reward,
+        deadline: deadline,
+        completed: false,
+        approved: false,
+        created-at: block-height,
+        rating: u0
+      }
+    )
+    
+    (map-set valid-domains
+      { domain: domain }
+      (merge domain-info { project-count: (+ (get project-count domain-info) u1) })
+    )
+    
+    (var-set project-count project-id)
+    (var-set total-platform-fees (+ (var-get total-platform-fees) platform-fee))
+    (ok project-id)
+  )
+)
+
+;; Accept a project (developer must have sufficient stake)
+(define-public (accept-project (project-id uint))
+  (let
+    (
+      (project (unwrap! (map-get? projects { project-id: project-id }) ERR-PROJECT-NOT-FOUND))
+      (developer-profile (unwrap! (map-get? developer-profiles { developer: tx-sender }) ERR-PROFILE-NOT-FOUND))
+      (domain-stake (default-to { stake-amount: u0, reputation: u0, projects-completed: u0 }
+                      (map-get? domain-stakes { developer: tx-sender, domain: (get domain project) })))
+    )
+    (asserts! (>= (get stake-amount domain-stake) (get stake-required project)) ERR-INSUFFICIENT-STAKE)
+    (asserts! (not (get completed project)) ERR-NOT-AUTHORIZED)
+    (asserts! (is-eq (get developer project) CONTRACT-OWNER) ERR-NOT-AUTHORIZED) ;; Not yet assigned
+    
+    (map-set projects
+      { project-id: project-id }
+      (merge project { developer: tx-sender })
+    )
+    
+    ;; Lock developer's stake
+    (map-set developer-profiles
+      { developer: tx-sender }
+      (merge developer-profile { 
+        locked-stake: (+ (get locked-stake developer-profile) (get stake-required project))
+      })
+    )
+    
+    (ok true)
+  )
+)
+
+;; Add milestone to project
+(define-public (add-milestone 
+  (project-id uint) 
+  (milestone-id uint)
+  (description (string-ascii 200))
+  (reward-percentage uint))
+  (let
+    (
+      (project (unwrap! (map-get? projects { project-id: project-id }) ERR-PROJECT-NOT-FOUND))
+    )
+    (asserts! (is-eq tx-sender (get client project)) ERR-NOT-AUTHORIZED)
+    (asserts! (<= reward-percentage u100) ERR-NOT-AUTHORIZED)
+    
+    (map-set milestones
+      { project-id: project-id, milestone-id: milestone-id }
+      {
+        description: description,
+        reward-percentage: reward-percentage,
+        completed: false,
+        approved: false
+      }
+    )
+    
+    (ok true)
+  )
+)
+
+;; Complete milestone
+(define-public (complete-milestone (project-id uint) (milestone-id uint))
+  (let
+    (
+      (project (unwrap! (map-get? projects { project-id: project-id }) ERR-PROJECT-NOT-FOUND))
+      (milestone (unwrap! (map-get? milestones { project-id: project-id, milestone-id: milestone-id }) ERR-PROJECT-NOT-FOUND))
+    )
+    (asserts! (is-eq tx-sender (get developer project)) ERR-NOT-AUTHORIZED)
+    (asserts! (not (get completed milestone)) ERR-NOT-AUTHORIZED)
+    
+    (map-set milestones
+      { project-id: project-id, milestone-id: milestone-id }
+      (merge milestone { completed: true })
+    )
+    
+    (ok true)
+  )
+)
+
+;; Approve milestone and release partial payment
+(define-public (approve-milestone (project-id uint) (milestone-id uint))
+  (let
+    (
+      (project (unwrap! (map-get? projects { project-id: project-id }) ERR-PROJECT-NOT-FOUND))
+      (milestone (unwrap! (map-get? milestones { project-id: project-id, milestone-id: milestone-id }) ERR-PROJECT-NOT-FOUND))
+      (milestone-reward (/ (* (get reward project) (get reward-percentage milestone)) u100))
+    )
+    (asserts! (is-eq tx-sender (get client project)) ERR-NOT-AUTHORIZED)
+    (asserts! (get completed milestone) ERR-NOT-AUTHORIZED)
+    (asserts! (not (get approved milestone)) ERR-NOT-AUTHORIZED)
+    
+    ;; Pay developer for milestone
+    (try! (as-contract (stx-transfer? milestone-reward tx-sender (get developer project))))
+    
+    (map-set milestones
+      { project-id: project-id, milestone-id: milestone-id }
+      (merge milestone { approved: true })
+    )
+    
+    (ok true)
+  )
+)
+
+;; Complete and approve full project
+(define-public (approve-project (project-id uint) (rating uint))
+  (let
+    (
+      (project (unwrap! (map-get? projects { project-id: project-id }) ERR-PROJECT-NOT-FOUND))
+      (developer-profile (unwrap! (map-get? developer-profiles { developer: (get developer project) }) ERR-PROFILE-NOT-FOUND))
+      (domain-stake (default-to { stake-amount: u0, reputation: u0, projects-completed: u0 }
+                      (map-get? domain-stakes { developer: (get developer project), domain: (get domain project) })))
+    )
+    (asserts! (is-eq tx-sender (get client project)) ERR-NOT-AUTHORIZED)
+    (asserts! (not (get completed project)) ERR-NOT-AUTHORIZED)
+    (asserts! (and (>= rating u1) (<= rating u5)) ERR-INVALID-RATING)
+    
+    ;; Pay developer remaining reward
+    (try! (as-contract (stx-transfer? (get reward project) tx-sender (get developer project))))
+    
+    ;; Update project status
+    (map-set projects
+      { project-id: project-id }
+      (merge project { completed: true, approved: true, rating: rating })
+    )
+    
+    ;; Update developer reputation and unlock stake
+    (let
+      ((reputation-bonus (* rating u2))
+       (new-total-ratings (+ (get total-ratings developer-profile) u1))
+       (new-average-rating (/ (+ (* (get average-rating developer-profile) (get total-ratings developer-profile)) rating) new-total-ratings)))
+      
+      (map-set developer-profiles
+        { developer: (get developer project) }
+        (merge developer-profile { 
+          reputation-score: (+ (get reputation-score developer-profile) reputation-bonus),
+          completed-projects: (+ (get completed-projects developer-profile) u1),
+          average-rating: new-average-rating,
+          total-ratings: new-total-ratings,
+          locked-stake: (- (get locked-stake developer-profile) (get stake-required project))
+        })
+      )
+      
+      ;; Update domain-specific reputation
+      (map-set domain-stakes
+        { developer: (get developer project), domain: (get domain project) }
+        (merge domain-stake { 
+          reputation: (+ (get reputation domain-stake) reputation-bonus),
+          projects-completed: (+ (get projects-completed domain-stake) u1)
+        })
+      )
+    )
+    
+    (ok true)
+  )
+)
