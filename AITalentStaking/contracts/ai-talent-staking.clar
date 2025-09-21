@@ -237,3 +237,110 @@
     (ok true)
   )
 )
+
+;; Create or update developer profile
+(define-public (create-profile)
+  (let
+    (
+      (existing-profile (map-get? developer-profiles { developer: tx-sender }))
+    )
+    (if (is-some existing-profile)
+      (ok false)
+      (begin
+        (map-set developer-profiles
+          { developer: tx-sender }
+          {
+            total-stake: u0,
+            reputation-score: u100,
+            completed-projects: u0,
+            active-since: block-height,
+            average-rating: u0,
+            total-ratings: u0,
+            locked-stake: u0,
+            withdrawal-time: u0
+          }
+        )
+        (ok true)
+      )
+    )
+  )
+)
+
+;; Stake tokens on expertise in a domain
+(define-public (stake-on-domain (domain (string-ascii 50)) (amount uint))
+  (let
+    (
+      (profile (unwrap! (map-get? developer-profiles { developer: tx-sender }) ERR-PROFILE-NOT-FOUND))
+      (domain-info (unwrap! (map-get? valid-domains { domain: domain }) ERR-INVALID-DOMAIN))
+      (existing-stake (default-to { stake-amount: u0, reputation: u0, projects-completed: u0 } 
+                        (map-get? domain-stakes { developer: tx-sender, domain: domain })))
+    )
+    (asserts! (get active domain-info) ERR-INVALID-DOMAIN)
+    (asserts! (>= amount (get min-stake domain-info)) ERR-INSUFFICIENT-STAKE)
+    (try! (stx-transfer? amount tx-sender (as-contract tx-sender)))
+    
+    (map-set domain-stakes
+      { developer: tx-sender, domain: domain }
+      {
+        stake-amount: (+ (get stake-amount existing-stake) amount),
+        reputation: (get reputation existing-stake),
+        projects-completed: (get projects-completed existing-stake)
+      }
+    )
+    
+    (map-set developer-profiles
+      { developer: tx-sender }
+      (merge profile { total-stake: (+ (get total-stake profile) amount) })
+    )
+    
+    (ok true)
+  )
+)
+
+;; Request stake withdrawal (with timelock)
+(define-public (request-withdrawal (domain (string-ascii 50)) (amount uint))
+  (let
+    (
+      (profile (unwrap! (map-get? developer-profiles { developer: tx-sender }) ERR-PROFILE-NOT-FOUND))
+      (domain-stake (unwrap! (map-get? domain-stakes { developer: tx-sender, domain: domain }) ERR-INVALID-DOMAIN))
+    )
+    (asserts! (>= (get stake-amount domain-stake) amount) ERR-INSUFFICIENT-STAKE)
+    (asserts! (>= (- (get total-stake profile) (get locked-stake profile)) amount) ERR-WITHDRAWAL-LOCKED)
+    
+    (map-set developer-profiles
+      { developer: tx-sender }
+      (merge profile { withdrawal-time: (+ block-height u144) }) ;; 1 day timelock
+    )
+    
+    (ok true)
+  )
+)
+
+;; Execute withdrawal after timelock
+(define-public (execute-withdrawal (domain (string-ascii 50)) (amount uint))
+  (let
+    (
+      (profile (unwrap! (map-get? developer-profiles { developer: tx-sender }) ERR-PROFILE-NOT-FOUND))
+      (domain-stake (unwrap! (map-get? domain-stakes { developer: tx-sender, domain: domain }) ERR-INVALID-DOMAIN))
+    )
+    (asserts! (>= block-height (get withdrawal-time profile)) ERR-WITHDRAWAL-LOCKED)
+    (asserts! (>= (get stake-amount domain-stake) amount) ERR-INSUFFICIENT-STAKE)
+    
+    (try! (as-contract (stx-transfer? amount tx-sender tx-sender)))
+    
+    (map-set domain-stakes
+      { developer: tx-sender, domain: domain }
+      (merge domain-stake { stake-amount: (- (get stake-amount domain-stake) amount) })
+    )
+    
+    (map-set developer-profiles
+      { developer: tx-sender }
+      (merge profile { 
+        total-stake: (- (get total-stake profile) amount),
+        withdrawal-time: u0
+      })
+    )
+    
+    (ok true)
+  )
+)
